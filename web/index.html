@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gesture Party</title>
+<style>
+  :root {
+    --bg: #0e0f1a;
+    --panel: #181a2b;
+    --text: #f2f3f8;
+    --muted: #9aa0b8;
+    --accent: #ffcf4a;
+    --bar: #6c7cff;
+    --bar-hit: #ffcf4a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(circle at 50% 0%, #1d2140 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  header { text-align: center; padding: 20px 16px 8px; }
+  header h1 { margin: 0; font-size: 28px; letter-spacing: 1px; }
+  header p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 16px;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 12px 16px 24px;
+  }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  .stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    border-radius: 16px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, .5);
+  }
+  .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #overlay-msg {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 20px; color: var(--muted); font-size: 18px;
+  }
+  .emoji-pop {
+    position: absolute; pointer-events: none; transform: translate(-50%, -50%);
+    font-size: 120px; line-height: 1; filter: drop-shadow(0 6px 18px rgba(0,0,0,.45));
+    animation: pop .5s cubic-bezier(.2, 1.6, .4, 1) both, wobble 1.2s ease-in-out .5s infinite;
+  }
+  .emoji-float {
+    position: absolute; pointer-events: none; font-size: 40px;
+    animation: floatUp 1.6s ease-out forwards;
+  }
+  @keyframes pop { from { transform: translate(-50%, -50%) scale(0); } to { transform: translate(-50%, -50%) scale(1); } }
+  @keyframes wobble {
+    0%, 100% { transform: translate(-50%, -50%) rotate(-8deg) scale(1); }
+    50% { transform: translate(-50%, -50%) rotate(8deg) scale(1.08); }
+  }
+  @keyframes floatUp {
+    from { opacity: 1; transform: translate(-50%, 0) scale(.6); }
+    to { opacity: 0; transform: translate(calc(-50% + var(--dx)), -220px) scale(1.2); }
+  }
+  aside {
+    background: var(--panel); border-radius: 16px; padding: 18px;
+    display: flex; flex-direction: column; gap: 16px; align-self: start;
+  }
+  .result { text-align: center; }
+  .result .label { font-size: 64px; font-weight: 800; color: var(--accent); line-height: 1.1; min-height: 70px; }
+  .result .sub { color: var(--muted); font-size: 13px; }
+  .bars { display: flex; flex-direction: column; gap: 8px; }
+  .bar-row { display: grid; grid-template-columns: 36px 1fr 44px; align-items: center; gap: 8px; font-size: 14px; }
+  .bar-track { height: 10px; background: #2a2d45; border-radius: 6px; overflow: hidden; }
+  .bar-fill { height: 100%; width: 0; background: var(--bar); transition: width .1s linear; }
+  .bar-row.hit .bar-fill { background: var(--bar-hit); }
+  .bar-row .pct { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  label.slider { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .legend { font-size: 14px; line-height: 1.8; border-top: 1px solid #2a2d45; padding-top: 12px; }
+  .legend b { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎉 Gesture Party</h1>
+  <p>손으로 <b>0</b>을 만들면 폭죽이, <b>3</b>을 만들면 🤩 가 나타나요</p>
+</header>
+
+<div class="layout">
+  <div class="stage" id="stage">
+    <canvas id="video-canvas" width="640" height="480"></canvas>
+    <canvas id="fx-canvas" width="640" height="480"></canvas>
+    <div id="overlay-msg">모델 불러오는 중…</div>
+  </div>
+
+  <aside>
+    <div class="result">
+      <div class="label" id="result-label">-</div>
+      <div class="sub" id="result-sub">손을 보여주세요</div>
+    </div>
+    <div class="bars" id="bars"></div>
+    <label class="slider">
+      <span>최소 확신도 <b id="thr-text">0.80</b></span>
+      <input type="range" id="threshold" min="0.3" max="0.99" step="0.01" value="0.8">
+    </label>
+    <div class="legend">
+      <div><b>0</b> → 🎆 폭죽</div>
+      <div><b>3</b> → 🤩 기대 이모지</div>
+    </div>
+  </aside>
+</div>
+
+<script type="module">
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/vision_bundle.mjs";
+
+const HAND_MODEL_URL = "../models/hand_landmarker.task";
+const GESTURE_MODEL_URL = "./custom_gesture.json";
+const FRAME_W = 640, FRAME_H = 480;   // same 4:3 frame the Python collector used
+const STABLE_FRAMES = 5;              // frames a gesture must hold before it counts
+const FIREWORK_EVERY_MS = 900;        // keep launching while "0" is held
+
+const videoCanvas = document.getElementById("video-canvas");
+const fxCanvas = document.getElementById("fx-canvas");
+const vctx = videoCanvas.getContext("2d");
+const fctx = fxCanvas.getContext("2d");
+const stage = document.getElementById("stage");
+const overlayMsg = document.getElementById("overlay-msg");
+const resultLabel = document.getElementById("result-label");
+const resultSub = document.getElementById("result-sub");
+const thresholdInput = document.getElementById("threshold");
+const thrText = document.getElementById("thr-text");
+
+// ---------------- Gesture classifier (same MLP as gesture_common.py) ----------------
+class GestureClassifier {
+  constructor({ classes, mean, std, layers }) {
+    this.classes = classes; this.mean = mean; this.std = std; this.layers = layers;
+  }
+  predictProba(x) {
+    let h = x.map((v, i) => (v - this.mean[i]) / this.std[i]);
+    this.layers.forEach(({ W, b }, li) => {
+      const out = b.slice();
+      for (let i = 0; i < h.length; i++) {
+        const hi = h[i], row = W[i];
+        if (hi === 0) continue;
+        for (let j = 0; j < out.length; j++) out[j] += hi * row[j];
+      }
+      h = li < this.layers.length - 1 ? out.map(v => Math.max(v, 0)) : out;
+    });
+    const m = Math.max(...h);
+    const e = h.map(v => Math.exp(v - m));
+    const s = e.reduce((a, b) => a + b, 0);
+    return e.map(v => v / s);
+  }
+}
+
+// Same normalization as landmarks_to_features() in gesture_common.py
+function landmarksToFeatures(landmarks, handedness) {
+  const w = landmarks[0];
+  const pts = landmarks.map(p => [p.x - w.x, p.y - w.y, p.z - w.z]);
+  const scale = Math.max(...pts.map(([x, y]) => Math.hypot(x, y)));
+  const out = [];
+  for (const [x, y, z] of pts) {
+    const k = scale > 0 ? 1 / scale : 1;
+    out.push((handedness === "Left" ? -x : x) * k, y * k, z * k);
+  }
+  return out;
+}
+
+// ---------------- Fireworks ----------------
+const particles = [];
+const rockets = [];
+function launchRocket(targetX, targetY) {
+  rockets.push({
+    x: targetX + (Math.random() - .5) * 80, y: FRAME_H + 10,
+    tx: targetX, ty: targetY,
+    hue: Math.floor(Math.random() * 360),
+  });
+}
+function explode(x, y, hue) {
+  const n = 90;
+  for (let i = 0; i < n; i++) {
+    const angle = (Math.PI * 2 * i) / n + Math.random() * .1;
+    const speed = 2 + Math.random() * 4.5;
+    particles.push({
+      x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+      life: 1, decay: .012 + Math.random() * .012,
+      hue: (hue + Math.random() * 40 - 20 + 360) % 360,
+      size: 2 + Math.random() * 2,
+    });
+  }
+}
+function fireworksShow(cx, cy) {
+  explode(cx, cy, Math.floor(Math.random() * 360));       // instant burst at the hand
+  for (let i = 0; i < 3; i++) {
+    setTimeout(() => launchRocket(80 + Math.random() * (FRAME_W - 160),
+                                  60 + Math.random() * 180), i * 180);
+  }
+}
+function updateFx() {
+  fctx.globalCompositeOperation = "destination-out";
+  fctx.fillStyle = "rgba(0,0,0,.25)";
+  fctx.fillRect(0, 0, FRAME_W, FRAME_H);
+  fctx.globalCompositeOperation = "lighter";
+
+  for (let i = rockets.length - 1; i >= 0; i--) {
+    const r = rockets[i];
+    r.x += (r.tx - r.x) * .08;
+    r.y += (r.ty - r.y) * .08;
+    fctx.fillStyle = `hsl(${r.hue} 100% 75%)`;
+    fctx.beginPath(); fctx.arc(r.x, r.y, 3, 0, Math.PI * 2); fctx.fill();
+    if (Math.abs(r.y - r.ty) < 6) { explode(r.x, r.y, r.hue); rockets.splice(i, 1); }
+  }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.vx *= .985; p.vy = p.vy * .985 + .06;
+    p.x += p.vx; p.y += p.vy;
+    p.life -= p.decay;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    fctx.fillStyle = `hsla(${p.hue} 100% 65% / ${p.life})`;
+    fctx.beginPath(); fctx.arc(p.x, p.y, p.size * p.life + .5, 0, Math.PI * 2); fctx.fill();
+  }
+  fctx.globalCompositeOperation = "source-over";
+}
+
+// ---------------- Emoji ----------------
+let emojiEl = null;
+function stageXY(x, y) {
+  const r = stage.getBoundingClientRect();
+  return [x / FRAME_W * r.width, y / FRAME_H * r.height];
+}
+function showEmoji(x, y) {
+  const [sx, sy] = stageXY(x, y);
+  if (!emojiEl) {
+    emojiEl = document.createElement("div");
+    emojiEl.className = "emoji-pop";
+    emojiEl.textContent = "🤩";
+    stage.appendChild(emojiEl);
+    for (let i = 0; i < 6; i++) setTimeout(() => floatEmoji(x, y), i * 120);
+  }
+  emojiEl.style.left = `${sx}px`;
+  emojiEl.style.top = `${sy}px`;
+}
+function hideEmoji() {
+  if (emojiEl) { emojiEl.remove(); emojiEl = null; }
+}
+function floatEmoji(x, y) {
+  const [sx, sy] = stageXY(x, y);
+  const el = document.createElement("div");
+  el.className = "emoji-float";
+  el.textContent = ["✨", "🤩", "⭐", "💫"][Math.floor(Math.random() * 4)];
+  el.style.left = `${sx + (Math.random() - .5) * 120}px`;
+  el.style.top = `${sy}px`;
+  el.style.setProperty("--dx", `${(Math.random() - .5) * 160}px`);
+  stage.appendChild(el);
+  el.addEventListener("animationend", () => el.remove());
+}
+
+// ---------------- Probability bars ----------------
+let barRows = {};
+function buildBars(classes) {
+  const box = document.getElementById("bars");
+  box.innerHTML = "";
+  barRows = {};
+  for (const c of classes) {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.innerHTML = `<span>${c}</span><div class="bar-track"><div class="bar-fill"></div></div><span class="pct">0%</span>`;
+    box.appendChild(row);
+    barRows[c] = { row, fill: row.querySelector(".bar-fill"), pct: row.querySelector(".pct") };
+  }
+}
+function updateBars(classes, probs, hit) {
+  classes.forEach((c, i) => {
+    const p = probs ? probs[i] : 0;
+    barRows[c].fill.style.width = `${(p * 100).toFixed(0)}%`;
+    barRows[c].pct.textContent = `${(p * 100).toFixed(0)}%`;
+    barRows[c].row.classList.toggle("hit", c === hit);
+  });
+}
+
+// ---------------- Main ----------------
+thresholdInput.addEventListener("input", () => thrText.textContent = Number(thresholdInput.value).toFixed(2));
+
+async function main() {
+  const [vision, gestureJson] = await Promise.all([
+    FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm"),
+    fetch(GESTURE_MODEL_URL).then(r => {
+      if (!r.ok) throw new Error("custom_gesture.json 이 없습니다. 먼저 학습하세요.");
+      return r.json();
+    }),
+  ]);
+  const classifier = new GestureClassifier(gestureJson);
+  buildBars(classifier.classes);
+
+  const landmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "GPU" },
+    runningMode: "VIDEO",
+    numHands: 2,
+    minHandDetectionConfidence: .5,
+    minHandPresenceConfidence: .5,
+    minTrackingConfidence: .5,
+  });
+
+  overlayMsg.textContent = "카메라 권한을 허용해주세요";
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+  const video = document.createElement("video");
+  video.srcObject = stream;
+  video.playsInline = true;
+  video.muted = true;
+  await video.play();
+  overlayMsg.remove();
+
+  // Mirrored, center-cropped 4:3 frame — exactly what the Python collector fed the model
+  const frame = new OffscreenCanvas(FRAME_W, FRAME_H);
+  const frameCtx = frame.getContext("2d");
+
+  let history = [];
+  let stableLabel = null;
+  let lastFirework = 0;
+  let lastTs = 0;
+
+  function loop() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (vw && vh) {
+      const cropW = Math.min(vw, vh * 4 / 3), cropH = cropW * 3 / 4;
+      frameCtx.save();
+      frameCtx.translate(FRAME_W, 0);
+      frameCtx.scale(-1, 1);
+      frameCtx.drawImage(video, (vw - cropW) / 2, (vh - cropH) / 2, cropW, cropH, 0, 0, FRAME_W, FRAME_H);
+      frameCtx.restore();
+
+      const ts = Math.max(performance.now(), lastTs + 1);
+      lastTs = ts;
+      const result = landmarker.detectForVideo(frame, ts);
+
+      vctx.drawImage(frame, 0, 0);
+      const threshold = Number(thresholdInput.value);
+      let firstLabel = null, firstProbs = null, firstAnchor = null;
+
+      result.landmarks.forEach((lms, idx) => {
+        const hand = result.handedness[idx][0].categoryName;
+        const probs = classifier.predictProba(landmarksToFeatures(lms, hand));
+        const best = probs.indexOf(Math.max(...probs));
+        const label = probs[best] >= threshold ? classifier.classes[best] : null;
+
+        const pts = lms.map(p => [p.x * FRAME_W, p.y * FRAME_H]);
+        vctx.strokeStyle = label ? "#ffcf4a" : "#5cff9d";
+        vctx.lineWidth = 3;
+        for (const { start, end } of HandLandmarker.HAND_CONNECTIONS) {
+          vctx.beginPath(); vctx.moveTo(...pts[start]); vctx.lineTo(...pts[end]); vctx.stroke();
+        }
+        vctx.fillStyle = "#ff4d6d";
+        for (const [x, y] of pts) { vctx.beginPath(); vctx.arc(x, y, 4, 0, Math.PI * 2); vctx.fill(); }
+
+        if (idx === 0) {
+          firstLabel = label;
+          firstProbs = probs;
+          const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+          firstAnchor = [(Math.min(...xs) + Math.max(...xs)) / 2, Math.min(...ys) - 70];
+        }
+      });
+
+      // Only react once a gesture is held for a few frames (avoids flicker)
+      history.push(firstLabel);
+      if (history.length > STABLE_FRAMES) history.shift();
+      const newStable = history.length === STABLE_FRAMES && history.every(l => l === history[0]) ? history[0] : stableLabel;
+      const entered = newStable !== stableLabel;
+      stableLabel = newStable;
+
+      resultLabel.textContent = stableLabel ?? "-";
+      resultSub.textContent = result.landmarks.length
+        ? (stableLabel ? `확신도 ${(Math.max(...firstProbs) * 100).toFixed(0)}%` : "인식 중…")
+        : "손을 보여주세요";
+      updateBars(classifier.classes, firstProbs, stableLabel);
+
+      const now = performance.now();
+      if (stableLabel === "0" && firstAnchor && (entered || now - lastFirework > FIREWORK_EVERY_MS)) {
+        fireworksShow(firstAnchor[0], firstAnchor[1] + 70);
+        lastFirework = now;
+      }
+      if (stableLabel === "3" && firstAnchor) showEmoji(firstAnchor[0], Math.max(firstAnchor[1], 70));
+      else hideEmoji();
+    }
+    updateFx();
+    requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+main().catch(err => {
+  console.error(err);
+  overlayMsg.textContent = `오류: ${err.message}`;
+});
+</script>
+</body>
+</html>
